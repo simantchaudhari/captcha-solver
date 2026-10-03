@@ -576,7 +576,31 @@ function buildRecaptchaV3Page(siteKey, action) {
 let browser;
 const ctxPool = [];
 
+async function initBrowserIfNeeded() {
+    if (!browser || !browser.isConnected()) {
+        const exePath = findPatchrightExe();
+        const isHeadless = process.env.HEADLESS === 'true';
+        browser = await chromium.launch({
+            executablePath: exePath || undefined,
+            headless: isHeadless,
+            args: [
+                '--no-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-gpu',
+                '--disable-extensions',
+                '--disable-background-networking',
+                '--disable-background-timer-throttling',
+                '--disable-backgrounding-occluded-windows',
+                '--disable-renderer-backgrounding',
+                '--no-first-run',
+                '--disable-blink-features=AutomationControlled',
+            ],
+        });
+    }
+}
+
 async function grabCtx() {
+    await initBrowserIfNeeded();
     while (ctxPool.length > 0) {
         const ctx = ctxPool.shift();
         // Health-check: verify context is still alive
@@ -590,13 +614,20 @@ async function grabCtx() {
     return await browser.newContext({ viewport: { width: 1280, height: 800 } });
 }
 
-async function dropCtx(ctx) {
-    try { await ctx.unrouteAll({ behavior: 'ignoreErrors' }); } catch {}
-    if (ctxPool.length < POOL_SIZE) {
-        ctxPool.push(ctx);
-    } else {
-        await ctx.close();
+async function dropCtx(ctx, hasError = false) {
+    if (hasError) {
+        try { await ctx.close(); } catch {}
+        return;
     }
+    try {
+        await ctx.pages(); // verify context is still healthy
+        await ctx.unrouteAll({ behavior: 'ignoreErrors' });
+        if (ctxPool.length < POOL_SIZE) {
+            ctxPool.push(ctx);
+            return;
+        }
+    } catch {}
+    try { await ctx.close(); } catch {}
 }
 
 function findPatchrightExe() {
@@ -663,6 +694,7 @@ async function solveRecaptcha(siteUrl, siteKey, timeout = TIMEOUT) {
     const pg  = await ctx.newPage();
     let checkboxClicked = false;
     let lastAudioAt     = 0;
+    let hasError        = false;
 
     const getBframe    = () => pg.frames().find(f => f.url().includes('google.com/recaptcha') && f.url().includes('bframe'));
     const getAnchorFr  = () => pg.frames().find(f => f.url().includes('google.com/recaptcha') && f.url().includes('anchor'));
@@ -769,21 +801,25 @@ async function solveRecaptcha(siteUrl, siteKey, timeout = TIMEOUT) {
 
             await new Promise(r => setTimeout(r, 400));
           } catch (loopErr) {
-              // Swallow "context destroyed" errors from frame reloads — just retry next tick
-              if (!loopErr.message?.includes('context')) throw loopErr;
+              // Swallow CDP frame detached / execution context destroyed errors from reCAPTCHA iframe reloads
+              const msg = loopErr?.message || '';
+              if (msg.includes('context') || msg.includes('Protocol error') || msg.includes('Target page') || msg.includes('detached')) {
+                  await new Promise(r => setTimeout(r, 500));
+                  continue;
+              }
+              throw loopErr;
           }
         }
 
         return { success: false, err: 'timeout', type: 'recaptcha' };
     } catch (e) {
+        hasError = true;
         return { success: false, err: e.message, type: 'recaptcha' };
     } finally {
-        await pg.close();
-        await dropCtx(ctx);
+        try { await pg.close(); } catch {}
+        await dropCtx(ctx, hasError);
     }
 }
-
-
 
 // ─────────────────────────────────────────────
 // Solver: reCAPTCHA v2 Invisible
@@ -794,6 +830,7 @@ async function solveRecaptchaInvisible(siteUrl, siteKey, timeout = TIMEOUT) {
     const t0 = Date.now();
     const ctx = await grabCtx();
     const pg  = await ctx.newPage();
+    let hasError = false;
 
     const getBframe   = () => pg.frames().find(f => f.url().includes('google.com/recaptcha') && f.url().includes('bframe'));
 
@@ -855,17 +892,23 @@ async function solveRecaptchaInvisible(siteUrl, siteKey, timeout = TIMEOUT) {
                     } catch {}
                 }
             } catch (loopErr) {
-                if (!loopErr.message?.includes('context')) throw loopErr;
+                const msg = loopErr?.message || '';
+                if (msg.includes('context') || msg.includes('Protocol error') || msg.includes('Target page') || msg.includes('detached')) {
+                    await new Promise(r => setTimeout(r, 500));
+                    continue;
+                }
+                throw loopErr;
             }
             await new Promise(r => setTimeout(r, 400));
         }
 
         return { success: false, err: 'timeout', type: 'recaptcha-invisible' };
     } catch (e) {
+        hasError = true;
         return { success: false, err: e.message, type: 'recaptcha-invisible' };
     } finally {
-        await pg.close();
-        await dropCtx(ctx);
+        try { await pg.close(); } catch {}
+        await dropCtx(ctx, hasError);
     }
 }
 
@@ -878,6 +921,7 @@ async function solveRecaptchaV3(siteUrl, siteKey, action = 'submit', timeout = T
     const t0 = Date.now();
     const ctx = await grabCtx();
     const pg  = await ctx.newPage();
+    let hasError = false;
 
     try {
         const html = buildRecaptchaV3Page(siteKey, action);
@@ -899,10 +943,11 @@ async function solveRecaptchaV3(siteUrl, siteKey, action = 'submit', timeout = T
 
         return { success: false, err: 'timeout', type: 'recaptcha-v3' };
     } catch (e) {
+        hasError = true;
         return { success: false, err: e.message, type: 'recaptcha-v3' };
     } finally {
-        await pg.close();
-        await dropCtx(ctx);
+        try { await pg.close(); } catch {}
+        await dropCtx(ctx, hasError);
     }
 }
 
