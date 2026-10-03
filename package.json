@@ -1,0 +1,10 @@
+{
+  "name": "turnstile",
+  "version": "1.0.0",
+  "main": "x.js",
+  "dependencies": {
+    "@playwright/test": "^1.62.1",
+    "express": "^4.18.0",
+    "rebrowser-playwright": "^1.51.1"
+  }
+}
