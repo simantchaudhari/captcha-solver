@@ -5,8 +5,27 @@ const path = require('path');
 const fs = require('fs');
 
 const PORT = process.env.CAPTCHA_PORT || 6768;
-const POOL_SIZE = parseInt(process.env.POOL_SIZE || '30', 10);
-const TIMEOUT = 60;
+const POOL_SIZE = parseInt(process.env.POOL_SIZE || '5', 10);  // keep low; contexts are pooled after use
+const TIMEOUT = parseInt(process.env.CAPTCHA_TIMEOUT || '10', 10);
+
+// ─────────────────────────────────────────────
+// Helper: is this a benign CDP/rebrowser frame-context error?
+// reCAPTCHA iframes frequently reload and destroy their JS contexts;
+// these errors are safe to swallow and retry.
+// ─────────────────────────────────────────────
+function isContextError(err) {
+    const msg = (err?.message || '') + (err?.type || '');
+    return (
+        msg.includes('Cannot find context') ||
+        msg.includes('context') ||
+        msg.includes('world') ||
+        msg.includes('Protocol error') ||
+        msg.includes('ProtocolError') ||
+        msg.includes('Target page') ||
+        msg.includes('detached') ||
+        msg.includes('Execution context was destroyed')
+    );
+}
 
 const HTML_UI = `<!DOCTYPE html>
 <html lang="en">
@@ -802,8 +821,7 @@ async function solveRecaptcha(siteUrl, siteKey, timeout = TIMEOUT) {
             await new Promise(r => setTimeout(r, 400));
           } catch (loopErr) {
               // Swallow CDP frame detached / execution context destroyed errors from reCAPTCHA iframe reloads
-              const msg = loopErr?.message || '';
-              if (msg.includes('context') || msg.includes('Protocol error') || msg.includes('Target page') || msg.includes('detached')) {
+              if (isContextError(loopErr)) {
                   await new Promise(r => setTimeout(r, 500));
                   continue;
               }
@@ -892,8 +910,8 @@ async function solveRecaptchaInvisible(siteUrl, siteKey, timeout = TIMEOUT) {
                     } catch {}
                 }
             } catch (loopErr) {
-                const msg = loopErr?.message || '';
-                if (msg.includes('context') || msg.includes('Protocol error') || msg.includes('Target page') || msg.includes('detached')) {
+                // Swallow CDP frame detached / execution context destroyed errors from reCAPTCHA iframe reloads
+                if (isContextError(loopErr)) {
                     await new Promise(r => setTimeout(r, 500));
                     continue;
                 }
@@ -1009,7 +1027,9 @@ async function main() {
         ],
     });
 
-    for (let i = 0; i < POOL_SIZE; i++) {
+    // Pre-warm a smaller set; grabCtx() creates new ones on demand up to POOL_SIZE
+    const prewarm = Math.min(POOL_SIZE, 3);
+    for (let i = 0; i < prewarm; i++) {
         ctxPool.push(await browser.newContext({ viewport: { width: 1280, height: 800 } }));
     }
 
